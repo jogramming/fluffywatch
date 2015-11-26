@@ -6,6 +6,7 @@ import (
 	"github.com/jonas747/fnet"
 	"github.com/jonas747/plex"
 	"strconv"
+	"time"
 )
 
 type ErrResp struct {
@@ -27,6 +28,20 @@ func checkError(session fnet.Session, err error, evtId int32) bool {
 		return true
 	}
 
+	return false
+}
+
+func checkAuth(session fnet.Session) bool {
+	if *flagPW == "" {
+		return true
+	}
+
+	isAuth, exists := session.Data.GetBool("auth")
+	if exists && isAuth {
+		return true
+	}
+
+	sendNotification(session, "You have to authenticate to do that")
 	return false
 }
 
@@ -87,6 +102,9 @@ type SearchReply struct {
 
 func handleSearch(session fnet.Session, sq SearchQuery) {
 	fmt.Println("Handling searchtv")
+	if !checkAuth(session) {
+		return
+	}
 
 	title := sq.Title
 	if title == "" {
@@ -134,6 +152,9 @@ type PlaylistAddItemReq struct {
 
 func handlePlaylistAdd(session fnet.Session, paReq PlaylistAddItemReq) {
 	fmt.Println("Handling playlistadd")
+	if !checkAuth(session) {
+		return
+	}
 
 	name, _ := session.Data.GetString("name")
 	broadcastNotification(fmt.Sprintf("%s Added something to the playlist", name))
@@ -231,6 +252,10 @@ type PlayRequest struct {
 }
 
 func handlePlay(session fnet.Session, pr PlayRequest) {
+	if !checkAuth(session) {
+		return
+	}
+
 	player.Lock.Lock()
 	defer player.Lock.Unlock()
 
@@ -264,6 +289,10 @@ func handlePlay(session fnet.Session, pr PlayRequest) {
 }
 
 func handlePause(session fnet.Session) {
+	if !checkAuth(session) {
+		return
+	}
+
 	player.Lock.Lock()
 	defer player.Lock.Unlock()
 
@@ -278,17 +307,29 @@ func handlePause(session fnet.Session) {
 }
 
 func handleNext(session fnet.Session) {
+	if !checkAuth(session) {
+		return
+	}
+
 	player.CmdChan <- PCMDNEXT
 	name, _ := session.Data.GetString("name")
 	broadcastNotification(fmt.Sprintf("%s Pressed next", name))
 }
 func handlePrevious(session fnet.Session) {
+	if !checkAuth(session) {
+		return
+	}
+
 	player.CmdChan <- PCMDPREV
 	name, _ := session.Data.GetString("name")
 	broadcastNotification(fmt.Sprintf("%s Pressed previous", name))
 }
 
 func handlePlaylistClear(session fnet.Session) {
+	if !checkAuth(session) {
+		return
+	}
+
 	player.Lock.Lock()
 	defer player.Lock.Unlock()
 
@@ -299,6 +340,10 @@ func handlePlaylistClear(session fnet.Session) {
 }
 
 func handleSetSettings(session fnet.Session, settings TranscoderSettings) {
+	if !checkAuth(session) {
+		return
+	}
+
 	// Check if the settings are valig
 	err := ValidatePreset(settings.Preset)
 	if err != nil {
@@ -311,6 +356,12 @@ func handleSetSettings(session fnet.Session, settings TranscoderSettings) {
 	player.Lock.Unlock()
 	name, _ := session.Data.GetString("name")
 	broadcastNotification(fmt.Sprintf("%s Changed the transcoder settings", name))
+	if settings.Subs {
+		fmt.Println("Subs are enabled!")
+	} else {
+		fmt.Println("Subs are disabled!")
+	}
+
 }
 
 type WatchingStatusUpdate struct {
@@ -335,12 +386,45 @@ type ChatMessage struct {
 }
 
 func handleChatMessage(session fnet.Session, cm ChatMessage) {
+	last, exists := session.Data.Get("lastchat")
+
 	from, _ := session.Data.GetString("name")
+	if exists {
+		cast := last.(time.Time)
+
+		since := time.Since(cast)
+		if since.Seconds() < 1 {
+			sendNotification(session, "You can send a maximum of 1 chat message per second")
+			return
+		}
+	}
+	session.Data.Set("lastchat", time.Now())
+
 	bcm := ChatMessage{Msg: cm.Msg, From: from}
-	wm, err := netEngine.CreateWireMessage(EvtChatMessage, bcm)
+	err := netEngine.CreateAndBroadcast(EvtChatMessage, bcm)
 	if err != nil {
-		fmt.Println("Error creating chat wire message", err)
+		fmt.Println("Error creating and sending chat message", err)
 		return
 	}
-	netEngine.Broadcast(wm)
+}
+
+func handleAuth(session fnet.Session, key string) {
+	fmt.Println("Attempting to authenticate with key ", key)
+
+	returnMessage := "Failed logging in, invalid key?"
+	if *flagPW == key {
+		session.Data.Set("auth", true)
+		returnMessage = "Successfully authenticated!"
+	}
+
+	if *flagPW == "" {
+		returnMessage = "There is no password set on the server"
+	}
+
+	// bcm := ChatMessage{Msg: returnMessage, From: "sys"}
+	// err := netEngine.CreateAndSend(session, EvtChatMessage, bcm)
+	// if err != nil {
+	// 	fmt.Println("Error creating chat wire message", err)
+	// }
+	sendNotification(session, returnMessage)
 }

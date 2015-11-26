@@ -5,6 +5,8 @@ package main
  */
 
 import (
+	"bufio"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -40,7 +43,10 @@ const (
 	EvtChatMessage               = 19
 	EvtNotification              = 20
 	EvtError                     = 21
+	EvtAuth                      = 22
 )
+
+const VERSION = "2.1.2 (2015/10/28)"
 
 var (
 	// Valid presets for x264
@@ -50,8 +56,9 @@ var (
 
 // Flags
 var (
-	flagPW   = flag.String("pw", "", "Password needed to controll this server")
-	flagAddr = flag.String("addr", ":7447", "Address  to listen to")
+	flagPW        = flag.String("pw", "", "Password needed to controll this server")
+	flagAddr      = flag.String("addr", ":7447", "Address  to listen to")
+	startPlaylist = flag.String("playlist", "", "A text file containing a list of video paths seperated by newline")
 )
 
 var (
@@ -72,12 +79,27 @@ func main() {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
+	roundTripper := http.DefaultTransport
+	transport := roundTripper.(*http.Transport)
+	transport.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: true,
+	}
+
+	httpClient := &http.Client{
+		Transport: transport,
+	}
+
 	pms = &plex.PlexServer{
-		Path: "http://192.168.1.10:32400",
+		Path:   "https://192.168.1.11:32400",
+		Client: httpClient,
 	}
 
 	player = NewPlayer("rtmp://jonas747.com/cinema/live")
 	go player.Monitor()
+
+	if *startPlaylist != "" {
+		loadPlaylist(*startPlaylist)
+	}
 
 	netEngine = fnet.DefaultEngine()
 	netEngine.Encoder = fnet.JsonEncoder{} // Use json instead of protocol buffers
@@ -112,6 +134,42 @@ func AddHandlers(engine *fnet.Engine) {
 	engine.AddHandler(fnet.NewHandlerSafe(handlePrevious, EvtPrev))
 	engine.AddHandler(fnet.NewHandlerSafe(handleWatchingStatusUpdate, EvtWatchingStateChange))
 	engine.AddHandler(fnet.NewHandlerSafe(handleChatMessage, EvtChatMessage))
+	engine.AddHandler(fnet.NewHandlerSafe(handleAuth, EvtAuth))
+}
+
+func loadPlaylist(path string) {
+	file, err := os.Open(path)
+
+	if err != nil {
+		panic(err.Error())
+	}
+
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+	scanner := bufio.NewScanner(reader)
+
+	scanner.Split(bufio.ScanLines)
+
+	player.Lock.Lock()
+	for scanner.Scan() {
+		fmt.Printf("Adding %s to the playlist...\n", scanner.Text())
+
+		name := scanner.Text()
+		lastIndex := strings.LastIndex(scanner.Text(), "/")
+		if lastIndex != -1 {
+			name = name[lastIndex:]
+		}
+
+		item := PlaylistItem{
+			Kind:     ITEMTYPEMOVIE,
+			Path:     scanner.Text(),
+			Duration: 69696969,
+			Title:    name,
+		}
+		player.CurrentPlaylist.Items = append(player.CurrentPlaylist.Items, item)
+	}
+	player.Lock.Unlock()
 }
 
 func LogSendError(r *http.Request, err error) {
@@ -191,7 +249,7 @@ func onOpenConn(session fnet.Session) {
 	session.Data.Set("name", fname)
 
 	vChangeChan <- ViewerChange{Name: fname, Watching: false}
-
+	sendNotification(session, fmt.Sprintf("Connected to fluffywatch %s!", VERSION))
 	broadcastNotification(fmt.Sprintf("%s Joined", fname))
 }
 
@@ -217,10 +275,19 @@ type Notification struct {
 func broadcastNotification(notification string) {
 	n := Notification{notification}
 
-	wm, err := netEngine.CreateWireMessage(EvtNotification, n)
+	err := netEngine.CreateAndBroadcast(EvtNotification, n)
 	if err != nil {
-		fmt.Println("Error creating notification message: ", err)
+		fmt.Println("Error broadcasting notification message: ", err)
 		return
 	}
-	netEngine.Broadcast(wm)
+}
+
+func sendNotification(session fnet.Session, text string) {
+	n := Notification{text}
+
+	err := netEngine.CreateAndSend(session, EvtNotification, n)
+	if err != nil {
+		fmt.Println("Error sending notification message: ", err)
+		return
+	}
 }

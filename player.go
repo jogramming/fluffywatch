@@ -46,6 +46,7 @@ type TranscoderSettings struct {
 	Preset     string `json:"preset"`
 	Streams    []int  `json:"streams"`
 	Seek       string `json:"seek"`
+	Subs       bool   `json:"subs"`
 }
 
 type Player struct {
@@ -190,13 +191,18 @@ func (p *Player) Play() {
 	}
 }
 
+func escapeFilters(in string) string {
+	replacer := strings.NewReplacer("[", "\\[", "]", "\\]")
+	return replacer.Replace(in)
+}
+
 func (p *Player) PlayItem(item PlaylistItem) {
 	p.Lock.Lock()
 	p.StartedPlaying = time.Now()
 	p.Lock.Unlock()
 
 	globalArgs := []string{
-		"--report",
+		"-report",
 		"-re",
 	}
 
@@ -229,17 +235,23 @@ func (p *Player) PlayItem(item PlaylistItem) {
 		inputArgs = append(inputArgs, fmt.Sprintf("0:%d", s))
 	}
 
+	vf := fmt.Sprintf("scale=%d:trunc(ow/a/2)*2", p.Settings.ScaleWidth)
+	if p.Settings.Subs {
+		vf += fmt.Sprintf(",subtitles=%s", escapeFilters(item.Path))
+	}
+	fmt.Println("Filters: ", vf)
+
 	miscArgs := []string{
-		"--strict", "-2", // Enable experimental codecs
+		"-strict", "-2", // Enable experimental codecs
 		"-c:a", "libfdk_aac", // Audio codec
 		"-ar", "44100", // Audio freq
 		"-vbr", "5", // Audio variable bitrate (5 is highest)
 		"-c:v", "libx264", // Video codec
 		"-profile:v", "baseline", // h264 profile
-		"-perset", p.Settings.Preset, // x264 preset
+		"-preset", p.Settings.Preset, // x264 preset
 		"-maxrate", fmt.Sprintf("%dk", p.Settings.MaxRate),
 		"-bufsize", fmt.Sprintf("%dk", p.Settings.MaxRate*2),
-		"-vf", fmt.Sprintf("scale=%d:trunc(ow/a/2)*2", p.Settings.ScaleWidth), // Set scale
+		"-vf", vf, // Set scale
 		"-f", "flv",
 	}
 
