@@ -27,14 +27,20 @@ func buildStatusMessage() ([]byte, error) {
 		}
 	}
 
+	v := make(map[string]bool)
+
 	viewersMutex.RLock()
+	for name, _ := range viewers {
+		v[name] = true
+	}
+	viewersMutex.RUnlock()
+
 	stReply := StatusReply{
 		Timestamp: timestamp,
 		Action:    action,
-		Viewers:   viewers,
+		Viewers:   v,
 		Playing:   player.Playing,
 	}
-	viewersMutex.RUnlock()
 	wm, err := netEngine.CreateWireMessage(EvtStatus, stReply)
 	return wm, err
 }

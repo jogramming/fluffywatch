@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jonas747/plex"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -23,6 +24,10 @@ const (
 const (
 	ITEMTYPETV    = 0
 	ITEMTYPEMOVIE = 1
+)
+
+const (
+	ENDNOSUBSFOUND = 1
 )
 
 type PlaylistItem struct {
@@ -110,8 +115,8 @@ func (p *Player) AddPlaylistItemByPlexVideo(vid plex.PlexDirectory, kind int) er
 		Season:    season,
 	}
 
-	fmt.Println("Appending to playlist")
-	fmt.Println(pi)
+	log.Println("Appending to playlist")
+	log.Println(pi)
 
 	p.Lock.Lock()
 	p.CurrentPlaylist.Items = append(p.CurrentPlaylist.Items, pi)
@@ -122,7 +127,7 @@ func (p *Player) AddPlaylistItemByPlexVideo(vid plex.PlexDirectory, kind int) er
 
 func (p *Player) Play() {
 	if p.Playing {
-		fmt.Println("Tried playing when were allready playing...")
+		log.Println("Tried playing when were allready playing...")
 		return
 	}
 
@@ -156,13 +161,17 @@ func (p *Player) Play() {
 			p.Lock.Lock()
 			p.CurrentPlaylist.CurrentIndex++
 			p.Lock.Unlock()
-			fmt.Println("Invalid path skipping element")
+			log.Println("Invalid path skipping element")
 			broadcastPlaylistStatus()
 			continue
 		}
 
 		// Actually start playing the item
-		p.PlayItem(item)
+		reason := p.PlayItem(item, p.Settings.Subs)
+		if reason == ENDNOSUBSFOUND {
+			log.Println("Falling back to no subs")
+			p.PlayItem(item, false)
+		}
 
 		// Reset the seek
 		p.Lock.Lock()
@@ -196,13 +205,13 @@ func escapeFilters(in string) string {
 	return replacer.Replace(in)
 }
 
-func (p *Player) PlayItem(item PlaylistItem) {
+func (p *Player) PlayItem(item PlaylistItem, subsEnabled bool) int {
 	p.Lock.Lock()
 	p.StartedPlaying = time.Now()
 	p.Lock.Unlock()
 
 	globalArgs := []string{
-		"-report",
+		//"-report",
 		"-re",
 	}
 
@@ -236,10 +245,10 @@ func (p *Player) PlayItem(item PlaylistItem) {
 	}
 
 	vf := fmt.Sprintf("scale=%d:trunc(ow/a/2)*2", p.Settings.ScaleWidth)
-	if p.Settings.Subs {
+	if subsEnabled {
 		vf += fmt.Sprintf(",subtitles=%s", escapeFilters(item.Path))
 	}
-	fmt.Println("Filters: ", vf)
+	log.Println("Filters: ", vf)
 
 	miscArgs := []string{
 		"-strict", "-2", // Enable experimental codecs
@@ -252,52 +261,9 @@ func (p *Player) PlayItem(item PlaylistItem) {
 		"-maxrate", fmt.Sprintf("%dk", p.Settings.MaxRate),
 		"-bufsize", fmt.Sprintf("%dk", p.Settings.MaxRate*2),
 		"-vf", vf, // Set scale
+		"-x264-params", "keyint=100:no-scenecut=1", // Set scale
 		"-f", "flv",
 	}
-
-	// // enable experimental codecs
-	// args = append(args, "-strict")
-	// args = append(args, "-2")
-
-	// // Set audio codec
-	// args = append(args, "-c:a")
-	// args = append(args, "libfdk_aac")
-
-	// // Set audio freq
-	// args = append(args, "-ar")
-	// args = append(args, "44100")
-
-	// // Set audio variable bitrate
-	// args = append(args, "-vbr")
-	// args = append(args, "5") // 5 is highest quality
-
-	// // Set Video codec
-	// args = append(args, "-c:v")
-	// args = append(args, "libx264")
-
-	// // Set baseline profile
-	// args = append(args, "-profile:v")
-	// args = append(args, "baseline")
-
-	// // Set preset
-	// args = append(args, "-preset")
-	// args = append(args, p.Settings.Preset)
-
-	// // Set max rate
-	// args = append(args, "-maxrate")
-	// args = append(args, fmt.Sprintf("%dk", p.Settings.MaxRate))
-
-	// // Set bufsize
-	// args = append(args, "-bufsize")
-	// args = append(args, fmt.Sprintf("%dk", p.Settings.MaxRate*2))
-
-	// // Set video scale
-	// args = append(args, "-vf")
-	// args = append(args, fmt.Sprintf("scale=%d:trunc(ow/a/2)*2", p.Settings.ScaleWidth))
-
-	// // Set format to flv
-	// args = append(args, "-f")
-	// args = append(args, "flv")
 
 	// Set output
 	args := make([]string, 0)
@@ -313,15 +279,21 @@ func (p *Player) PlayItem(item PlaylistItem) {
 
 	output, err := p.Ffmpeg.CombinedOutput()
 	if err != nil {
-		fmt.Println("ERROR:", err)
+		log.Println("ERROR:", err)
 	}
 
-	fmt.Println(string(output))
-	fmt.Println("Ended FFMPEG")
+	log.Println(string(output))
+	log.Println("Ended FFMPEG")
+
+	if subsEnabled && strings.Contains(string(output), "Error initializing filter 'subtitles' with args") {
+		return ENDNOSUBSFOUND
+	}
+
+	return 0
 }
 
 func (p *Player) Monitor() {
-	fmt.Println("FFMonitor started")
+	log.Println("FFMonitor started")
 	for {
 		select {
 		case c := <-p.CmdChan:
@@ -357,7 +329,7 @@ func (p *Player) Monitor() {
 			p.Lock.Unlock()
 		}
 	}
-	fmt.Println("FFMonitor stopped")
+	log.Println("FFMonitor stopped")
 }
 
 func ParseLocationStr(str string) (h, m, s int) {

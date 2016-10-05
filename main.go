@@ -7,12 +7,15 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"github.com/jonas747/fnet"
 	"github.com/jonas747/fnet/ws"
 	"github.com/jonas747/plex"
+	"io/ioutil"
+	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -44,9 +47,10 @@ const (
 	EvtNotification              = 20
 	EvtError                     = 21
 	EvtAuth                      = 22
+	EvtChatCmd                   = 23
 )
 
-const VERSION = "2.1.2 (2015/10/28)"
+const VERSION = "2.3.1 (2015/12/03)"
 
 var (
 	// Valid presets for x264
@@ -56,9 +60,28 @@ var (
 
 // Flags
 var (
-	flagPW        = flag.String("pw", "", "Password needed to controll this server")
-	flagAddr      = flag.String("addr", ":7447", "Address  to listen to")
-	startPlaylist = flag.String("playlist", "", "A text file containing a list of video paths seperated by newline")
+	// flagPW        = flag.String("pw", "", "Password needed to controll this server")
+	// flagAddr      = flag.String("addr", ":7447", "Address  to listen to")
+	// startPlaylist = flag.String("playlist", "", "A text file containing a list of video paths seperated by newline")
+	// publishPath   = flag.String("push", "rtmp://jonas747.com/cinema/live", "Where to publish to")
+	configPath = flag.String("config", "config.json", "Path to config")
+)
+
+type Config struct {
+	Master       string   `json:"master"`
+	Mods         []string `json:"mods"`
+	Listen       string   `json:"listen"`
+	PlaylistPath string   `json:"playlistPath"`
+	Publish      string   `json:"publish"`
+	Playlist     []string `json:"-"`
+	Bans         []string `json:"bans"`
+	IPBans       []string `json:"ipBans"`
+}
+
+var (
+	configLock     sync.RWMutex
+	config         *Config
+	lastConfigLoad time.Time
 )
 
 var (
@@ -66,14 +89,19 @@ var (
 	pms       *plex.PlexServer
 	netEngine *fnet.Engine
 
-	vChangeChan  = make(chan ViewerChange)
-	viewers      = make(map[string]bool)
+	viewers      = make(map[string]fnet.Session)
 	viewersMutex sync.RWMutex
 	idGenChan    = make(chan int64)
 )
 
 func main() {
 	flag.Parse()
+
+	logger := newLogger()
+	go logger.Writer()
+	log.SetOutput(logger)
+
+	log.Printf("\n\n########\nSTARTING %s\n#######\n\n", VERSION)
 
 	go incIdGen(idGenChan)
 
@@ -90,15 +118,33 @@ func main() {
 	}
 
 	pms = &plex.PlexServer{
-		Path:   "https://192.168.1.11:32400",
+		Path:   "https://192.168.1.10:32400",
 		Client: httpClient,
 	}
 
-	player = NewPlayer("rtmp://jonas747.com/cinema/live")
+	c, err := loadConfig(*configPath)
+	if err != nil {
+		config = &Config{
+			Master:  "*",
+			Mods:    make([]string, 0),
+			Listen:  ":7449",
+			Publish: "rtmp://jonas747.com/cinema/live",
+		}
+	} else {
+		lastConfigLoad = time.Now()
+		config = c
+		go configLoader(*configPath)
+	}
+
+	publish := config.Publish
+	if publish == "" {
+		publish = "rtmp://jonas747.com/cinema/live"
+	}
+	player = NewPlayer(publish)
 	go player.Monitor()
 
-	if *startPlaylist != "" {
-		loadPlaylist(*startPlaylist)
+	if config.PlaylistPath != "" {
+		loadPlaylist(config.PlaylistPath)
 	}
 
 	netEngine = fnet.DefaultEngine()
@@ -107,15 +153,18 @@ func main() {
 	netEngine.OnConnClose = onClosedConn
 
 	AddHandlers(netEngine)
-
+	listen := config.Listen
+	if listen == "" {
+		listen = ":7447"
+	}
+	log.Println("Listening on", listen)
 	listener := &ws.WebsocketListener{
 		Engine: netEngine,
-		Addr:   *flagAddr,
+		Addr:   listen,
 	}
 
 	go netEngine.AddListener(listener)
 	go netEngine.ListenChannels()
-	go sessionWatcher()
 	listenErrors(netEngine)
 }
 
@@ -135,6 +184,7 @@ func AddHandlers(engine *fnet.Engine) {
 	engine.AddHandler(fnet.NewHandlerSafe(handleWatchingStatusUpdate, EvtWatchingStateChange))
 	engine.AddHandler(fnet.NewHandlerSafe(handleChatMessage, EvtChatMessage))
 	engine.AddHandler(fnet.NewHandlerSafe(handleAuth, EvtAuth))
+	engine.AddHandler(fnet.NewHandlerSafe(handleChatCmd, EvtChatCmd))
 }
 
 func loadPlaylist(path string) {
@@ -153,7 +203,7 @@ func loadPlaylist(path string) {
 
 	player.Lock.Lock()
 	for scanner.Scan() {
-		fmt.Printf("Adding %s to the playlist...\n", scanner.Text())
+		log.Printf("Adding %s to the playlist...\n", scanner.Text())
 
 		name := scanner.Text()
 		lastIndex := strings.LastIndex(scanner.Text(), "/")
@@ -164,7 +214,7 @@ func loadPlaylist(path string) {
 		item := PlaylistItem{
 			Kind:     ITEMTYPEMOVIE,
 			Path:     scanner.Text(),
-			Duration: 69696969,
+			Duration: 0,
 			Title:    name,
 		}
 		player.CurrentPlaylist.Items = append(player.CurrentPlaylist.Items, item)
@@ -176,7 +226,7 @@ func LogSendError(r *http.Request, err error) {
 	if err == nil {
 		return
 	}
-	fmt.Printf("Error sending response to [%s] Error: %s", r.RemoteAddr, err.Error())
+	log.Printf("Error sending response to [%s] Error: %s", r.RemoteAddr, err.Error())
 }
 
 func ValidatePath(path string) error {
@@ -210,53 +260,54 @@ type ViewerChange struct {
 	Watching bool
 }
 
-func sessionWatcher() {
-	for {
-		select {
-		case change := <-vChangeChan:
-			viewersMutex.Lock()
-			viewers[change.Name] = change.Watching
-			viewersMutex.Unlock()
-			broadcastStatus()
-		}
-	}
-}
-
 func onClosedConn(session fnet.Session) {
 	name, exists := session.Data.GetString("name")
 	if exists {
 		viewersMutex.Lock()
 		delete(viewers, name)
 		viewersMutex.Unlock()
-		broadcastNotification(fmt.Sprintf("%s Left :'(", name))
+		broadcastNotification(fmt.Sprintf("%s Left :'(", name), false)
 	}
 
-	fmt.Println(name, " disconnected!")
+	log.Println(name, " disconnected!")
 	broadcastStatus()
 }
 
 func onOpenConn(session fnet.Session) {
-	fmt.Println("Someone connected!")
+	log.Println("Someone connected!")
 	pl, err := buildPlaylistMessage()
 	if err != nil {
-		fmt.Println("Error building playlist message!: ", err)
+		log.Println("Error building playlist message!: ", err)
 		return
 	}
 	session.Conn.Send(pl)
 
-	id := <-idGenChan
-	fname := fmt.Sprintf("dude#%d", id)
-	session.Data.Set("name", fname)
+	name := ""
+	viewersMutex.Lock()
+	for {
+		id := <-idGenChan
+		fname := fmt.Sprintf("dude#%d", id)
+		_, exists := viewers[fname]
+		if exists {
+			continue
+		} else {
+			name = fname
+			break
+		}
+	}
+	session.Data.Set("name", name)
+	viewers[name] = session
+	viewersMutex.Unlock()
 
-	vChangeChan <- ViewerChange{Name: fname, Watching: false}
-	sendNotification(session, fmt.Sprintf("Connected to fluffywatch %s!", VERSION))
-	broadcastNotification(fmt.Sprintf("%s Joined", fname))
+	sendNotification(session, fmt.Sprintf("Connected to fluffywatch %s!", VERSION), true)
+	broadcastNotification(fmt.Sprintf("%s Joined", name), false)
+	broadcastStatus()
 }
 
 func listenErrors(engine *fnet.Engine) {
 	for {
 		err := <-engine.ErrChan
-		fmt.Printf("fnet Error: ", err.Error())
+		log.Printf("fnet Error: ", err.Error())
 	}
 }
 
@@ -269,25 +320,176 @@ func incIdGen(out chan int64) {
 }
 
 type Notification struct {
-	Msg string `json:"msg"`
+	Msg    string `json:"msg"`
+	Bypass bool   `json:"bypass"` // Bypass ignore sys
 }
 
-func broadcastNotification(notification string) {
-	n := Notification{notification}
+func broadcastNotification(notification string, bypass bool) {
+	n := Notification{notification, bypass}
 
 	err := netEngine.CreateAndBroadcast(EvtNotification, n)
 	if err != nil {
-		fmt.Println("Error broadcasting notification message: ", err)
+		log.Println("Error broadcasting notification message: ", err)
 		return
 	}
 }
 
-func sendNotification(session fnet.Session, text string) {
-	n := Notification{text}
+func sendNotification(session fnet.Session, text string, bypass bool) {
+	n := Notification{text, bypass}
 
 	err := netEngine.CreateAndSend(session, EvtNotification, n)
 	if err != nil {
-		fmt.Println("Error sending notification message: ", err)
+		log.Println("Error sending notification message: ", err)
 		return
 	}
+}
+
+func configLoader(path string) {
+	ticker := time.NewTicker(1 * time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			finfo, err := os.Stat(path)
+			if err != nil {
+				log.Println("Failed stat config", err)
+				continue
+			}
+			if finfo.ModTime().Unix() != lastConfigLoad.Unix() {
+				c, err := loadConfig(path)
+				if err != nil {
+					log.Println("Failed loading config..", err)
+					return
+				}
+				configLock.Lock()
+				config = c
+				configLock.Unlock()
+				lastConfigLoad = finfo.ModTime()
+				log.Println("Loaded config")
+			}
+		}
+	}
+}
+
+func loadConfig(path string) (*Config, error) {
+	file, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var c Config
+	err = json.Unmarshal(file, &c)
+	return &c, err
+}
+
+func saveConfig(path string) error {
+	marshalled, err := json.MarshalIndent(config, "", "\t")
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(path, marshalled, 0664)
+}
+
+func addMod(id string) error {
+	configLock.Lock()
+	defer configLock.Unlock()
+
+	for _, m := range config.Mods {
+		if id == m {
+			return errors.New("Allready mod")
+		}
+	}
+
+	config.Mods = append(config.Mods, id)
+	return saveConfig(*configPath)
+}
+
+func removeMod(id string) error {
+	newMods := make([]string, 0)
+
+	configLock.Lock()
+	defer configLock.Unlock()
+
+	found := false
+	for _, m := range config.Mods {
+		if m != id {
+			newMods = append(newMods, m)
+		} else {
+			found = true
+		}
+	}
+
+	if !found {
+		return errors.New("User not mod?")
+	}
+	config.Mods = newMods
+	return saveConfig(*configPath)
+}
+
+func banUser(id string) error {
+	configLock.Lock()
+	defer configLock.Unlock()
+	for _, m := range config.Bans {
+		if id == m {
+			return errors.New("Allready banned")
+		}
+	}
+
+	config.Bans = append(config.Bans, id)
+	return saveConfig(*configPath)
+}
+
+func unBanUser(id string) error {
+	newBans := make([]string, 0)
+
+	configLock.Lock()
+	defer configLock.Unlock()
+
+	found := false
+	for _, m := range config.Bans {
+		if m != id {
+			newBans = append(newBans, m)
+		} else {
+			found = true
+		}
+	}
+	if !found {
+		return errors.New("User not banned?")
+	}
+	config.Bans = newBans
+	return saveConfig(*configPath)
+}
+
+func banIP(ip string) error {
+	configLock.Lock()
+	defer configLock.Unlock()
+
+	for _, m := range config.IPBans {
+		if ip == m {
+			return errors.New("Allready banned")
+		}
+	}
+
+	config.IPBans = append(config.IPBans, ip)
+	return saveConfig(*configPath)
+}
+
+func unBanIP(ip string) error {
+	newBans := make([]string, 0)
+
+	configLock.Lock()
+	defer configLock.Unlock()
+
+	found := false
+	for _, m := range config.IPBans {
+		if m != ip {
+			newBans = append(newBans, m)
+		} else {
+			found = true
+		}
+	}
+	if !found {
+		return errors.New("User not banned?")
+	}
+	config.IPBans = newBans
+	return saveConfig(*configPath)
 }
