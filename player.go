@@ -55,6 +55,7 @@ type TranscoderSettings struct {
 }
 
 type Player struct {
+	Lock            sync.Mutex         `json:"-"`
 	CurrentPlaylist Playlist           `json:"playlist"`
 	Settings        TranscoderSettings `json:"settings"`
 	Out             string             `json:"-"`
@@ -64,7 +65,7 @@ type Player struct {
 	CmdChan         chan PlayerCMD     `json:"-"`
 	StartedPlaying  time.Time          `json:"-"`
 	StoppedPlaying  time.Time          `json:"-"`
-	Lock            sync.Mutex         `json:"-"`
+	StartSegment    int
 }
 
 func NewPlayer(out string) *Player {
@@ -73,6 +74,7 @@ func NewPlayer(out string) *Player {
 		MaxRate:    2000,
 		Preset:     "veryfast",
 		Streams:    []int{0, 1},
+		Subs:       true,
 	}
 
 	pl := Playlist{
@@ -125,6 +127,17 @@ func (p *Player) AddPlaylistItemByPlexVideo(vid plex.PlexDirectory, kind int) er
 	return nil
 }
 
+func (p *Player) AddPlaylistItem(item PlaylistItem) error {
+	log.Println("Appending to playlist")
+	log.Println(item.Path)
+
+	p.Lock.Lock()
+	p.CurrentPlaylist.Items = append(p.CurrentPlaylist.Items, item)
+	p.Lock.Unlock()
+
+	return nil
+}
+
 func (p *Player) Play() {
 	if p.Playing {
 		log.Println("Tried playing when were allready playing...")
@@ -153,6 +166,11 @@ func (p *Player) Play() {
 			p.Lock.Unlock()
 		}
 
+		p.Lock.Lock()
+		startSeg := p.StartSegment
+		p.StartSegment += 1000
+		p.Lock.Unlock()
+
 		item := p.CurrentPlaylist.Items[p.CurrentPlaylist.CurrentIndex]
 		// Validate the path
 		err := ValidatePath(item.Path)
@@ -167,10 +185,10 @@ func (p *Player) Play() {
 		}
 
 		// Actually start playing the item
-		reason := p.PlayItem(item, p.Settings.Subs)
+		reason := p.PlayItem(item, p.Settings.Subs, startSeg)
 		if reason == ENDNOSUBSFOUND {
 			log.Println("Falling back to no subs")
-			p.PlayItem(item, false)
+			p.PlayItem(item, false, startSeg)
 		}
 
 		// Reset the seek
@@ -205,7 +223,7 @@ func escapeFilters(in string) string {
 	return replacer.Replace(in)
 }
 
-func (p *Player) PlayItem(item PlaylistItem, subsEnabled bool) int {
+func (p *Player) PlayItem(item PlaylistItem, subsEnabled bool, startSeg int) int {
 	p.Lock.Lock()
 	p.StartedPlaying = time.Now()
 	p.Lock.Unlock()
@@ -250,9 +268,15 @@ func (p *Player) PlayItem(item PlaylistItem, subsEnabled bool) int {
 	}
 	log.Println("Filters: ", vf)
 
+	configLock.Lock()
+	playlistPath := config.HLSPlaylistPath
+	//segDir := config.SegmentDir
+	configLock.Unlock()
+
 	miscArgs := []string{
 		"-strict", "-2", // Enable experimental codecs
-		"-c:a", "libfdk_aac", // Audio codec
+		// "-c:a", "libfdk_aac", // Audio codec
+		"-c:a", "aac", // Audio codec
 		"-ar", "44100", // Audio freq
 		"-vbr", "5", // Audio variable bitrate (5 is highest)
 		"-c:v", "libx264", // Video codec
@@ -262,7 +286,15 @@ func (p *Player) PlayItem(item PlaylistItem, subsEnabled bool) int {
 		"-bufsize", fmt.Sprintf("%dk", p.Settings.MaxRate*2),
 		"-vf", vf, // Set scale
 		"-x264-params", "keyint=100:no-scenecut=1", // Set scale
-		"-f", "flv",
+		"-f", "hls", // Set scale
+		"-start_number", fmt.Sprint(startSeg),
+		"-hls_allow_cache", "0",
+		"-hls_flags", "discont_start",
+		//"-reset_timestamps", "1",
+		// "-segment_start_number", fmt.Sprint(startSeg),
+		// "-segment_list_flags", "live",
+		// "-segment_list", playlistPath,
+		// "-segment_list_size", "10",
 	}
 
 	// Set output
@@ -272,7 +304,8 @@ func (p *Player) PlayItem(item PlaylistItem, subsEnabled bool) int {
 	args = append(args, miscArgs...)
 
 	// Set output path
-	args = append(args, p.Out)
+	args = append(args, playlistPath)
+	log.Println(args)
 
 	//Finally execute the command
 	p.Ffmpeg = exec.Command("ffmpeg", args...)

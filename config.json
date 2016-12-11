@@ -1,14 +1,10 @@
 {
-	"master": "insert_master_id_here",
+	"master": "insert masters id here",
 	"playlistPath": "",
-	"publish": "",
-	"listen": "",
+	"hls_playlist_path": "/home/jonas/projects/fluffywatch/streamdata/playlist.m3u8",
+	"segment_dir": "/home/jonas/projects/fluffywatch/streamdata/",
+	"listen": ":7447",
 	"mods": [],
-	"bans": [
-		"ass"
-	],
-	"ipBans": [
-		"",
-		"192.168.137.1"
-	]
+	"bans": [],
+	"ipBans": []
 }

@@ -6,7 +6,7 @@ import (
 	"github.com/jonas747/fnet"
 	"github.com/jonas747/plex"
 	"log"
-	"strconv"
+	//"strconv"
 	"time"
 )
 
@@ -99,7 +99,7 @@ func checkMaster(session fnet.Session, respond bool) bool {
 	}
 
 	if respond {
-		sendNotification(session, "You're not a master", true)
+		sendNotification(session, "You're not an admin", true)
 	}
 	return false
 }
@@ -160,112 +160,112 @@ type SearchReply struct {
 	Kind  string               `json:"kind"`
 }
 
-func handleSearch(session fnet.Session, sq SearchQuery) {
-	log.Println("Handling searchtv")
-	if !checkMaster(session, true) {
-		return
-	}
+// func handleSearch(session fnet.Session, sq SearchQuery) {
+// 	log.Println("Handling searchtv")
+// 	if !checkMaster(session, true) {
+// 		return
+// 	}
 
-	title := sq.Title
-	if title == "" {
-		sendErrResp(session, errors.New("Title is empty"), EvtSearch)
-		return
-	}
+// 	title := sq.Title
+// 	if title == "" {
+// 		sendErrResp(session, errors.New("Title is empty"), EvtSearch)
+// 		return
+// 	}
 
-	var items []plex.PlexDirectory
+// 	var items []plex.PlexDirectory
 
-	if sq.Kind == "tv" {
-		mediaContainer, err := pms.FetchContainer("/library/all?type=2&title=" + title)
-		if checkError(session, err, EvtSearch) {
-			return
-		}
-		items = mediaContainer.Directories
-	} else {
-		mediaContainer, err := pms.FetchContainer("/library/all?type=1&title=" + title)
-		if checkError(session, err, EvtSearch) {
-			return
-		}
-		items = mediaContainer.Videos
-	}
+// 	if sq.Kind == "tv" {
+// 		mediaContainer, err := pms.FetchContainer("/library/all?type=2&title=" + title)
+// 		if checkError(session, err, EvtSearch) {
+// 			return
+// 		}
+// 		items = mediaContainer.Directories
+// 	} else {
+// 		mediaContainer, err := pms.FetchContainer("/library/all?type=1&title=" + title)
+// 		if checkError(session, err, EvtSearch) {
+// 			return
+// 		}
+// 		items = mediaContainer.Videos
+// 	}
 
-	if items == nil || len(items) < 1 {
-		sendErrResp(session, errors.New("No search results! :("), EvtSearch)
-		return
-	}
-	reply := SearchReply{items, sq.Kind}
+// 	if items == nil || len(items) < 1 {
+// 		sendErrResp(session, errors.New("No search results! :("), EvtSearch)
+// 		return
+// 	}
+// 	reply := SearchReply{items, sq.Kind}
 
-	err := netEngine.CreateAndSend(session, EvtSearch, reply)
-	if checkError(session, err, EvtSearch) {
-		return
-	}
-}
+// 	err := netEngine.CreateAndSend(session, EvtSearch, reply)
+// 	if checkError(session, err, EvtSearch) {
+// 		return
+// 	}
+// }
 
-type PlaylistAddItemReq struct {
-	PlexItem plex.PlexDirectory `json:"plexItem"`
+// type PlaylistAddItemReq struct {
+// 	PlexItem plex.PlexDirectory `json:"plexItem"`
 
-	Kind string
-	// For tv shows
-	Episode     int  `json:"episode"`
-	Season      int  `json:"season"`
-	AddAllAfter bool `json:"addAllAfter"`
-}
+// 	Kind string
+// 	// For tv shows
+// 	Episode     int  `json:"episode"`
+// 	Season      int  `json:"season"`
+// 	AddAllAfter bool `json:"addAllAfter"`
+// }
 
-func handlePlaylistAdd(session fnet.Session, paReq PlaylistAddItemReq) {
-	log.Println("Handling playlistadd")
-	if !checkMaster(session, true) {
-		return
-	}
+// func handlePlaylistAdd(session fnet.Session, paReq PlaylistAddItemReq) {
+// 	log.Println("Handling playlistadd")
+// 	if !checkMaster(session, true) {
+// 		return
+// 	}
 
-	name, _ := session.Data.GetString("name")
-	broadcastNotification(fmt.Sprintf("%s Added something to the playlist", name), true)
+// 	name, _ := session.Data.GetString("name")
+// 	broadcastNotification(fmt.Sprintf("%s Added something to the playlist", name), true)
 
-	switch paReq.Kind {
-	case "tv":
-		// Get all episodes and find the right one!
-		uri := "/library/metadata/" + paReq.PlexItem.RatingKey + "/allLeaves"
-		allEpisodes, err := pms.FetchContainer(uri)
-		if err != nil {
-			log.Println("Error adding playlist item, unable to access all episodes: ", err)
-			return
-		}
+// 	switch paReq.Kind {
+// 	case "tv":
+// 		// Get all episodes and find the right one!
+// 		uri := "/library/metadata/" + paReq.PlexItem.RatingKey + "/allLeaves"
+// 		allEpisodes, err := pms.FetchContainer(uri)
+// 		if err != nil {
+// 			log.Println("Error adding playlist item, unable to access all episodes: ", err)
+// 			return
+// 		}
 
-		// Find our episode
-		for _, ep := range allEpisodes.Videos {
-			index, _ := strconv.Atoi(ep.Index)
-			parentIndex, _ := strconv.Atoi(ep.ParentIndex)
-			if index == paReq.Episode && parentIndex == paReq.Season {
-				// found it
-				err := player.AddPlaylistItemByPlexVideo(ep, ITEMTYPETV)
-				if err != nil {
-					log.Println("Error adding playlist item: ", err)
-				}
-			} else if paReq.AddAllAfter && (parentIndex > paReq.Season || (parentIndex == paReq.Season && index > paReq.Episode)) {
-				// If were adding all after selected
-				err := player.AddPlaylistItemByPlexVideo(ep, ITEMTYPETV)
-				if err != nil {
-					log.Println("Error adding playlist item: ", err)
-				}
-			}
-		}
+// 		// Find our episode
+// 		for _, ep := range allEpisodes.Videos {
+// 			index, _ := strconv.Atoi(ep.Index)
+// 			parentIndex, _ := strconv.Atoi(ep.ParentIndex)
+// 			if index == paReq.Episode && parentIndex == paReq.Season {
+// 				// found it
+// 				err := player.AddPlaylistItemByPlexVideo(ep, ITEMTYPETV)
+// 				if err != nil {
+// 					log.Println("Error adding playlist item: ", err)
+// 				}
+// 			} else if paReq.AddAllAfter && (parentIndex > paReq.Season || (parentIndex == paReq.Season && index > paReq.Episode)) {
+// 				// If were adding all after selected
+// 				err := player.AddPlaylistItemByPlexVideo(ep, ITEMTYPETV)
+// 				if err != nil {
+// 					log.Println("Error adding playlist item: ", err)
+// 				}
+// 			}
+// 		}
 
-	case "movie":
-		fullVideoContainer, err := pms.FetchContainer(paReq.PlexItem.Key)
-		if checkError(session, err, EvtPlaylistAdd) {
-			return
-		}
-		err = player.AddPlaylistItemByPlexVideo(fullVideoContainer.Videos[0], ITEMTYPEMOVIE)
-		if checkError(session, err, EvtPlaylistAdd) {
-			return
-		}
-	}
+// 	case "movie":
+// 		fullVideoContainer, err := pms.FetchContainer(paReq.PlexItem.Key)
+// 		if checkError(session, err, EvtPlaylistAdd) {
+// 			return
+// 		}
+// 		err = player.AddPlaylistItemByPlexVideo(fullVideoContainer.Videos[0], ITEMTYPEMOVIE)
+// 		if checkError(session, err, EvtPlaylistAdd) {
+// 			return
+// 		}
+// 	}
 
-	// Broadcast the new playlist
-	wm, err := buildPlaylistMessage()
-	if checkError(session, err, EvtPlaylistAdd) {
-		return
-	}
-	netEngine.Broadcast(wm)
-}
+// 	// Broadcast the new playlist
+// 	wm, err := buildPlaylistMessage()
+// 	if checkError(session, err, EvtPlaylistAdd) {
+// 		return
+// 	}
+// 	netEngine.Broadcast(wm)
+// }
 
 type StatusReply struct {
 	Timestamp int             `json:"timestamp"`
@@ -396,7 +396,7 @@ func handlePlaylistClear(session fnet.Session) {
 	player.CurrentPlaylist.Items = make([]PlaylistItem, 0)
 	name, _ := session.Data.GetString("name")
 	broadcastNotification(fmt.Sprintf("%s Cleared the playlist", name), true)
-
+	go broadcastPlaylistStatus()
 }
 
 func handleSetSettings(session fnet.Session, settings TranscoderSettings) {
@@ -609,5 +609,12 @@ func handleChatCmd(session fnet.Session, data chatCmd) {
 		sendNotification(session, "unbanned ip "+data.Target, true)
 		log.Printf("{%s}[%s] '%s' ip unbanned '%s' [%s]\n", targetSession.Conn.IP(), ownId, ownName, data.Target, targetSession.Conn.IP())
 	}
+}
 
+func handleReloadPlaylist(session fnet.Session) {
+	if !checkMaster(session, true) {
+		return
+	}
+	loadPlaylist(flagPlaylistPath)
+	broadcastPlaylistStatus()
 }

@@ -6,14 +6,12 @@ package main
 
 import (
 	"bufio"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"github.com/jonas747/fnet"
 	"github.com/jonas747/fnet/ws"
-	"github.com/jonas747/plex"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -48,9 +46,10 @@ const (
 	EvtError                     = 21
 	EvtAuth                      = 22
 	EvtChatCmd                   = 23
+	EvtReloadPlaylist            = 24
 )
 
-const VERSION = "2.3.1 (2015/12/03)"
+const VERSION = "3.0.0 (2016/12/08)"
 
 var (
 	// Valid presets for x264
@@ -64,18 +63,25 @@ var (
 	// flagAddr      = flag.String("addr", ":7447", "Address  to listen to")
 	// startPlaylist = flag.String("playlist", "", "A text file containing a list of video paths seperated by newline")
 	// publishPath   = flag.String("push", "rtmp://jonas747.com/cinema/live", "Where to publish to")
-	configPath = flag.String("config", "config.json", "Path to config")
+	flagPlaylistPath string
+	configPath       string
 )
 
+func init() {
+	flag.StringVar(&configPath, "config", "config.json", "Path to config")
+	flag.StringVar(&flagPlaylistPath, "playlist", "playlist", "Path to playlist")
+}
+
 type Config struct {
-	Master       string   `json:"master"`
-	Mods         []string `json:"mods"`
-	Listen       string   `json:"listen"`
-	PlaylistPath string   `json:"playlistPath"`
-	Publish      string   `json:"publish"`
-	Playlist     []string `json:"-"`
-	Bans         []string `json:"bans"`
-	IPBans       []string `json:"ipBans"`
+	Master          string   `json:"master"`
+	Mods            []string `json:"mods"`
+	Listen          string   `json:"listen"`
+	PlaylistPath    string   `json:"playlistPath"`
+	HLSPlaylistPath string   `json:"hls_playlist_path"`
+	SegmentDir      string   `json:"segment_dir"`
+	Playlist        []string `json:"-"`
+	Bans            []string `json:"bans"`
+	IPBans          []string `json:"ipBans"`
 }
 
 var (
@@ -85,8 +91,8 @@ var (
 )
 
 var (
-	player    *Player
-	pms       *plex.PlexServer
+	player *Player
+	// pms       *plex.PlexServer
 	netEngine *fnet.Engine
 
 	viewers      = make(map[string]fnet.Session)
@@ -107,40 +113,36 @@ func main() {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	roundTripper := http.DefaultTransport
-	transport := roundTripper.(*http.Transport)
-	transport.TLSClientConfig = &tls.Config{
-		InsecureSkipVerify: true,
-	}
+	// roundTripper := http.DefaultTransport
+	// transport := roundTripper.(*http.Transport)
+	// transport.TLSClientConfig = &tls.Config{
+	// 	InsecureSkipVerify: true,
+	// }
 
-	httpClient := &http.Client{
-		Transport: transport,
-	}
+	// httpClient := &http.Client{
+	// 	Transport: transport,
+	// }
 
-	pms = &plex.PlexServer{
-		Path:   "https://192.168.1.10:32400",
-		Client: httpClient,
-	}
+	// pms = &plex.PlexServer{
+	// 	Path:   "https://192.168.1.10:32400",
+	// 	Client: httpClient,
+	// }
 
-	c, err := loadConfig(*configPath)
+	c, err := loadConfig(configPath)
 	if err != nil {
 		config = &Config{
-			Master:  "*",
-			Mods:    make([]string, 0),
-			Listen:  ":7449",
-			Publish: "rtmp://jonas747.com/cinema/live",
+			Master: "*",
+			Mods:   make([]string, 0),
+			Listen: ":7449",
+			//Publish: "rtmp://jonas747.com/cinema/live",
 		}
 	} else {
 		lastConfigLoad = time.Now()
 		config = c
-		go configLoader(*configPath)
+		go configLoader(configPath)
 	}
 
-	publish := config.Publish
-	if publish == "" {
-		publish = "rtmp://jonas747.com/cinema/live"
-	}
-	player = NewPlayer(publish)
+	player = NewPlayer("")
 	go player.Monitor()
 
 	if config.PlaylistPath != "" {
@@ -163,6 +165,7 @@ func main() {
 		Addr:   listen,
 	}
 
+	go CleanupLoop()
 	go netEngine.AddListener(listener)
 	go netEngine.ListenChannels()
 	listenErrors(netEngine)
@@ -170,12 +173,10 @@ func main() {
 
 func AddHandlers(engine *fnet.Engine) {
 	engine.AddHandler(fnet.NewHandlerSafe(handlerUserSetName, EvtSetName))
-	engine.AddHandler(fnet.NewHandlerSafe(handleSearch, EvtSearch))
 	engine.AddHandler(fnet.NewHandlerSafe(handleStatus, EvtStatus))
 	engine.AddHandler(fnet.NewHandlerSafe(handlePlaylist, EvtPlaylist))
 	engine.AddHandler(fnet.NewHandlerSafe(handleSettings, EvtSettings))
 	engine.AddHandler(fnet.NewHandlerSafe(handleSetSettings, EvtSetSettings))
-	engine.AddHandler(fnet.NewHandlerSafe(handlePlaylistAdd, EvtPlaylistAdd))
 	engine.AddHandler(fnet.NewHandlerSafe(handlePlaylistClear, EvtPlaylistClear))
 	engine.AddHandler(fnet.NewHandlerSafe(handlePlay, EvtPlay))
 	engine.AddHandler(fnet.NewHandlerSafe(handlePause, EvtPause))
@@ -185,9 +186,11 @@ func AddHandlers(engine *fnet.Engine) {
 	engine.AddHandler(fnet.NewHandlerSafe(handleChatMessage, EvtChatMessage))
 	engine.AddHandler(fnet.NewHandlerSafe(handleAuth, EvtAuth))
 	engine.AddHandler(fnet.NewHandlerSafe(handleChatCmd, EvtChatCmd))
+	engine.AddHandler(fnet.NewHandlerSafe(handleReloadPlaylist, EvtReloadPlaylist))
 }
 
 func loadPlaylist(path string) {
+	log.Println("Started playlist loading")
 	file, err := os.Open(path)
 
 	if err != nil {
@@ -202,7 +205,16 @@ func loadPlaylist(path string) {
 	scanner.Split(bufio.ScanLines)
 
 	player.Lock.Lock()
+OUTER:
 	for scanner.Scan() {
+		for _, v := range player.CurrentPlaylist.Items {
+			if v.Path == scanner.Text() {
+				// Only add new items
+				log.Println("Skipping", v.Path)
+				continue OUTER
+			}
+		}
+
 		log.Printf("Adding %s to the playlist...\n", scanner.Text())
 
 		name := scanner.Text()
@@ -400,7 +412,7 @@ func addMod(id string) error {
 	}
 
 	config.Mods = append(config.Mods, id)
-	return saveConfig(*configPath)
+	return saveConfig(configPath)
 }
 
 func removeMod(id string) error {
@@ -422,7 +434,7 @@ func removeMod(id string) error {
 		return errors.New("User not mod?")
 	}
 	config.Mods = newMods
-	return saveConfig(*configPath)
+	return saveConfig(configPath)
 }
 
 func banUser(id string) error {
@@ -435,7 +447,7 @@ func banUser(id string) error {
 	}
 
 	config.Bans = append(config.Bans, id)
-	return saveConfig(*configPath)
+	return saveConfig(configPath)
 }
 
 func unBanUser(id string) error {
@@ -456,7 +468,7 @@ func unBanUser(id string) error {
 		return errors.New("User not banned?")
 	}
 	config.Bans = newBans
-	return saveConfig(*configPath)
+	return saveConfig(configPath)
 }
 
 func banIP(ip string) error {
@@ -470,7 +482,7 @@ func banIP(ip string) error {
 	}
 
 	config.IPBans = append(config.IPBans, ip)
-	return saveConfig(*configPath)
+	return saveConfig(configPath)
 }
 
 func unBanIP(ip string) error {
@@ -491,5 +503,37 @@ func unBanIP(ip string) error {
 		return errors.New("User not banned?")
 	}
 	config.IPBans = newBans
-	return saveConfig(*configPath)
+	return saveConfig(configPath)
+}
+
+func CleanupLoop() {
+	ticker := time.NewTicker(time.Second)
+
+	configLock.Lock()
+	segDir := config.SegmentDir
+	configLock.Unlock()
+	for {
+		<-ticker.C
+		dir, err := ioutil.ReadDir(segDir)
+		if err != nil {
+			log.Println("ERr cleanup:", err)
+			continue
+		}
+
+		for _, v := range dir {
+			split := strings.Split(v.Name(), ".")
+			if len(split) < 2 {
+				continue
+			}
+
+			if split[1] != "ts" {
+				continue
+			}
+
+			if time.Since(v.ModTime()) > time.Second*60 {
+				os.Remove(segDir + v.Name())
+				//log.Println("removing", v.Name())
+			}
+		}
+	}
 }
