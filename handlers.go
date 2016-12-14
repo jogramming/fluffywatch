@@ -6,6 +6,7 @@ import (
 	"github.com/jonas747/fnet"
 	"github.com/jonas747/plex"
 	"log"
+	"strings"
 	//"strconv"
 	"time"
 )
@@ -266,6 +267,30 @@ type SearchReply struct {
 // 	}
 // 	netEngine.Broadcast(wm)
 // }
+
+type AddByPathData struct {
+	Path string `json:"path"`
+}
+
+func handleAddByPath(session fnet.Session, data AddByPathData) {
+	log.Printf("Adding %s to the playlist...\n", data.Path)
+
+	lastIndex := strings.LastIndex(data.Path, "/")
+	name := data.Path
+	if lastIndex != -1 {
+		name = name[lastIndex:]
+	}
+
+	item := PlaylistItem{
+		Kind:     ITEMTYPEMOVIE,
+		Path:     data.Path,
+		Duration: 0,
+		Title:    name,
+	}
+
+	player.AddPlaylistItem(item)
+	broadcastPlaylistStatus()
+}
 
 type StatusReply struct {
 	Timestamp int             `json:"timestamp"`

@@ -47,6 +47,7 @@ const (
 	EvtAuth                      = 22
 	EvtChatCmd                   = 23
 	EvtReloadPlaylist            = 24
+	EvtAddByPath                 = 25
 )
 
 const VERSION = "3.0.0 (2016/12/08)"
@@ -187,6 +188,7 @@ func AddHandlers(engine *fnet.Engine) {
 	engine.AddHandler(fnet.NewHandlerSafe(handleAuth, EvtAuth))
 	engine.AddHandler(fnet.NewHandlerSafe(handleChatCmd, EvtChatCmd))
 	engine.AddHandler(fnet.NewHandlerSafe(handleReloadPlaylist, EvtReloadPlaylist))
+	engine.AddHandler(fnet.NewHandlerSafe(handleAddByPath, EvtAddByPath))
 }
 
 func loadPlaylist(path string) {
